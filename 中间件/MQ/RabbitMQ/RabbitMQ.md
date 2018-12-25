@@ -6,7 +6,7 @@
 
 - 开源, 性能有效, 稳定性好
 - 提供可靠性消息投递模式(confirm), 返回模式(return)等
-- 与Springtime完美整合, API丰富
+- 与Spring完美整合, API丰富
 - 集群模式丰富, 支持表达式配置, 高可用HA模式, 镜像队列模型
 - 可以保证数据不丢失的前提下做到高可靠性, 可用性
 
@@ -32,7 +32,7 @@
 - **Server :** 又称Broker, 接受客户端连接, 实现AMQP实体服务
 - **Connection :** 连接, 应用程序与Broker的网络连接
 - **Channel :** 网络信道, 几乎所有的操作都在Channel中进行, Channel是进行消息读写的通道。客户端可以建立多个Channel, 每个Channel代表一个会话任务。
-- **Message :** 消息, 服务器和应用程序纸质件传送的数据, 有Properties和Body组成。Properties可以对消息进行修饰, 比如消息的优先级, 延迟等高级特性; Body就是消息体内容。
+- **Message :** 消息, 服务器和应用程序之间传送的数据, 有Properties和Body组成。Properties可以对消息进行修饰, 比如消息的优先级, 延迟等高级特性; Body就是消息体内容。
 - **Virtual Host :** 虚拟地址, 用于进行逻辑隔离, 最上层的消息路由。一个Virtual Host里面可以有若干个Exchange和Queue, 同一个Virtual Host里面不能有相同名称的Exchange或Queue
 - **Exchange :** 交换机, 用于接收消息, 根据路由键转发消息到绑定的队列
 - **Binding :** Exchange和Queue之间的虚拟连接, binding中可以包含routing key
@@ -276,8 +276,6 @@ public class Consumer {
 - Name : 交换机名称
 
 - Type : 交换机类型, direct, topic, fanout, headers
-
-  - 
 
 - Durability : 是否需要持久化, true为持久化
 
@@ -648,6 +646,11 @@ public class ConsumerByFanout {
 
 }
 ```
+
+## Headers Exchange
+
+- Headers Exchange不使用RoutingKey去绑定, 而是通过消息headers的键值对匹配
+- 这个Exchange很少会使用, 这里就不细说了
 
 # Binding-绑定
 
@@ -2222,10 +2225,390 @@ public class RabbitAdminTest {
 - 设置具体的消息监听器, 消息转换器等
 - SimpleMessageListenerContainer可以进行动态设置, 比如在运行中的应用可以动态的修改其消费者数量的大小, 接收消息的模式等, 很多基于RabbitMQ的定制的后端管控台进行动态设置的时候, 也是基于这一特性去实现的
 
+#### XML配置
+
+**自定义MessageListener:**
+
+```java
+package com.qiyexue.xml;
+
+import com.rabbitmq.client.Channel;
+import org.springframework.amqp.core.Message;
+import org.springframework.amqp.rabbit.core.ChannelAwareMessageListener;
+
+/**
+ * 自定义MessageListener
+ *
+ * @author 七夜雪
+ * @date 2018-12-23 8:31
+ */
+public class MyMessageListener implements ChannelAwareMessageListener {
+
+    @Override
+    public void onMessage(Message message, Channel channel) throws Exception {
+        String msg = new String(message.getBody());
+        System.out.println(msg);
+    }
+}
+
+```
+
+
+
+
+
+```xml
+    <bean id="myMessageListener" class="com.qiyexue.xml.MyMessageListener"/>
+
+	<!--方法一 : 使用rabbit:listener-container标签设置listener-container-->
+    <rabbit:listener-container connection-factory="connectionFactory"
+                               auto-startup="true"
+                               acknowledge="auto"
+                               max-concurrency="5"
+                               concurrency="1"
+                               requeue-rejected="false">
+
+        <!--使用queue-names="queue001"也可以, 但是queues和queue-names不能同时使用-->
+        <rabbit:listener ref="myMessageListener" queues="queue002,queue003"/>
+    </rabbit:listener-container>
+
+    <!--方法二 : 使用普通Spring Bean方式设置MessageListenerContainer-->
+    <bean id="simpleMessageListenerContainer"
+          class="org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer">
+        <property name="connectionFactory" ref="connectionFactory"/>
+        <property name="autoStartup" value="true"/>
+        <property name="acknowledgeMode" value="AUTO"/>
+        <property name="concurrentConsumers" value="1"/>
+        <property name="defaultRequeueRejected" value="false"/>
+        <property name="consumerTagStrategy" ref="myConsumerTag"/>
+        <property name="messageListener" ref="myMessageListener"/>
+        <property name="queueNames" value="queue001,queue002,queue003"/>
+    </bean>
+```
+
+#### Java类配置方式
+
+**配置类中添加如下配置:**
+
+```java
+    @Bean
+    public SimpleMessageListenerContainer messageContainer(ConnectionFactory connectionFactory) {
+        SimpleMessageListenerContainer container = new SimpleMessageListenerContainer(connectionFactory);
+        // 添加要监听的队列
+//        container.setQueues(queue001());
+        // 添加要监听的队列, 传入队列名, 和setQueues使用其中一个即可
+        container.setQueueNames("queue001","queue002", "queue003");
+        // 设置当前消费者格式
+        container.setConcurrentConsumers(1);
+        // 设置最大消费者个数
+        container.setMaxConcurrentConsumers(5);
+        // 是否重回队列
+        container.setDefaultRequeueRejected(false);
+        // 设置签收模式
+        container.setAcknowledgeMode(AcknowledgeMode.AUTO);
+        container.setExposeListenerChannel(true);
+        // 设置消费者标签
+        container.setConsumerTagStrategy(new ConsumerTagStrategy() {
+            @Override
+            public String createConsumerTag(String queue) {
+                return queue + "_" + UUID.randomUUID().toString();
+            }
+        });
+
+        // 设置监听MessageListener
+        container.setMessageListener(new ChannelAwareMessageListener() {
+            @Override
+            public void onMessage(Message message, Channel channel) throws Exception {
+                String msg = new String(message.getBody());
+                System.out.println(msg);
+            }
+        });
+
+        return container;
+    }
+```
+
+测试直接使用RabbitTemplate发送消息即可
+
 ### MessageListenerAdapter
+
+- 适配器模式监听消息
+
+- defaultListenerMethod默认监听方法名称, 用于设置监听方法名称, 默认handleMessage
+
+- Delegate委托对象, 委派设计模式, 实际真实的委托对象, 用于处理消息
+
+- queueOrTagToMethodName队列标识与方法名称组成的集合
+
+  > - 可以一一进行队列与方法名称的匹配
+  > - 队列与方法名称绑定, 即指定队列里的消息会被绑定的方法所接受处理
+
+#### XML方式配置
+
+```xml
+    <!--使用MessageListenerAdapter-->
+    <bean id="messageListenerAdapter"
+          class="org.springframework.amqp.rabbit.listener.adapter.MessageListenerAdapter">
+        <constructor-arg>
+            <ref bean="messageDelegate"/>
+        </constructor-arg>
+    </bean>
+	<!--委托对象-->
+    <bean id="messageDelegate" class="com.qiyexue.adapter.MessageDelegate"/>
+```
+
+#### Java类方式配置
+
+```java
+        /**
+         * 适配器方式 : 默认的方法名字的：handleMessage
+         * 可以自己指定方法名
+         * 也可以添加一个转换器, 将字节数组转换为String, 默认简单消息也是会转换成String的
+         */
+        MessageListenerAdapter adapter = new MessageListenerAdapter(new MessageDelegate());
+        adapter.setDefaultListenerMethod("consumeMessage");
+        adapter.setMessageConverter(new TextMessageConverter());
+        container.setMessageListener(adapter);
+
+        /**
+         * 适配器模式, 队列与方法名绑定
+         */
+        MessageListenerAdapter adapter = new MessageListenerAdapter(new MessageDelegate());
+        Map<String, String> queueToMethodMap = new HashMap<>();
+        queueToMethodMap.put("queue001", "queue1Method");
+        queueToMethodMap.put("queue002", "queue2Method");
+        adapter.setQueueOrTagToMethodName(queueToMethodMap);
+        container.setMessageListener(adapter);
+```
+
+**测试方法 :**
+
+```java
+    @Test
+    public void testSendMessage4Text() throws Exception {
+        //1 创建消息
+        MessageProperties messageProperties = new MessageProperties();
+        messageProperties.setContentType("text/plain");
+        Message message = new Message("听雪楼中听雪落...".getBytes(), messageProperties);
+        rabbitTemplate.send("topic001", "biluo.test", message);
+        rabbitTemplate.send("topic002", "huangquan.test", message);
+    }
+```
 
 ### MessageConverter
 
+- 在发送消息的时候, 正常情况下消息体是以二进制的数据方式进行传输, 如果希望内部进行转换, 或者指定自定义的转换器, 就需要用到MessageConverter
+
+- 自定义常用转换器 : MessageConverter, 一般来讲,都需要实现这个接口
+
+  > 实现下面两个方法:
+  >
+  > - toMessage : Java对象转换为Message
+  >
+  > - fromMessage : Message对象转换成java对象
+
+- 转换器类型
+
+  > - Json转换器 : Jackson2JsonMessageConverter, 可以进行java对象的转换功能
+  >
+  > - DefaultJackson2JavaTypeMapper映射器 : 可以进行java对象的映射
+  >
+  > - 自定义二进制转换器 : 如图片,PDF, PPT等, 可以将多个转换器放到一个全局转换器ContentTypeDelegatingMessageConverter中
+
 ## RabbitMQ整合SpringBoot
 
+### Producer配置
+
+- publisher-confirms, 实现一个监听器用于监听Broker端给我们返回的确认请求 : RabbitTemplate.ConfirmCallback
+- publisher-returns, 保证消息对Broker端是可达的, 如果出现路由键不可达的情况, 则使用监听器对不可达的消息进行后续的处理, 保证消息的路由成功 : RabbitTemplate.ReturnCallback
+- 注意 : 在发送消息时堆template进行配置mandatory=true, 保证监听有效
+- 生产端还可以配置其他属性, 如发送重试, 超时时间, 重试次数, 间隔等
+
+**application.properties或application.yml文件中添加配置 :**
+
+```properties
+spring.rabbitmq.addresses=192.168.72.138:5672
+spring.rabbitmq.username=guest
+spring.rabbitmq.password=guest
+spring.rabbitmq.virtual-host=/
+spring.rabbitmq.connection-timeout=15000
+
+spring.rabbitmq.publisher-confirms=true
+spring.rabbitmq.publisher-returns=true
+spring.rabbitmq.template.mandatory=true
+```
+
+**创建生产者类, 添加ConfirmCallback,ReturnCallback :**
+
+```java
+package qiyexue.rabbitmq.producer;
+
+import org.springframework.amqp.rabbit.connection.CorrelationData;
+import org.springframework.amqp.rabbit.core.RabbitTemplate;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.messaging.Message;
+import org.springframework.messaging.MessageHeaders;
+import org.springframework.messaging.support.MessageBuilder;
+import org.springframework.stereotype.Component;
+
+import java.util.Map;
+
+/**
+ * 生产者
+ *
+ * @author 七夜雪
+ * @date 2018-12-24 20:30
+ */
+@Component
+public class Producer {
+
+    @Autowired
+    private RabbitTemplate rabbitTemplate;
+
+    // 实现RabbitTemplate.ConfirmCallback接口, 这里使用lambda表达式实现
+    // confirm(CorrelationData correlationData, boolean ack, String cause)
+    private final RabbitTemplate.ConfirmCallback confirmCallback = (correlationData, ack, cause) -> {
+        System.out.println("correlationData : " + correlationData);
+        System.out.println("ack : " + ack);
+        if (!ack) {
+            System.err.println("ConfirmCallback发生异常....");
+        }
+    };
+
+    // 实现RabbitTemplate.ReturnCallback接口, 这里使用lambda表达式实现
+    /*public void returnedMessage(Message message, int replyCode, String replyText,
+                                String exchange, String routingKey)*/
+    private final RabbitTemplate.ReturnCallback returnCallback = (message, replyCode, replyText,
+                                                                  exchange, routingKey) -> {
+        System.out.println("message : " + message);
+        System.out.println("replyCode : " + replyCode);
+        System.out.println("replyText : " + replyText);
+        System.out.println("exchange : " + exchange);
+        System.out.println("routingKey : " + routingKey);
+    };
+
+    public void sendMsg(Object message, Map<String, Object> properties) {
+        MessageHeaders messageHeaders = new MessageHeaders(properties);
+        Message msg = MessageBuilder.createMessage(message, messageHeaders);
+        rabbitTemplate.setConfirmCallback(confirmCallback);
+        rabbitTemplate.setReturnCallback(returnCallback);
+        CorrelationData correlationData = new CorrelationData("123456789");
+        rabbitTemplate.convertAndSend("springboot", "springboot.test", msg, correlationData);
+    }
+
+}
+```
+
+**单元测试 :**
+
+```java
+    @Test
+    public void testSendMsg(){
+        String message = "听雪楼中听雪落";
+        Map<String, Object> properties = new HashMap<>();
+        properties.put("name", "七夜雪");
+        producer.sendMsg(message, properties);
+    }
+```
+
+**application.properties或application.yml文件中添加配置 :**
+
+```properties
+spring.rabbitmq.addresses=192.168.72.138:5672
+spring.rabbitmq.username=guest
+spring.rabbitmq.password=guest
+spring.rabbitmq.virtual-host=/
+spring.rabbitmq.connection-timeout=15000
+
+# 签收模式, 手工签收
+spring.rabbitmq.listener.simple.acknowledge-mode=manual
+spring.rabbitmq.listener.simple.concurrency=1
+spring.rabbitmq.listener.simple.max-concurrency=5
+```
+
+**新建消费者监听类:**
+
+
+
+### Consumer配置
+
+- 首先签收模式为手工签收, 用于ACK的手工处理, 这样我们可以保证消息的可靠性送达, 或者在消费端消费失败的时候做一些日志记录, 补偿机制等
+
+- 可以设置消费端的监听个数和最大个数, 用于控制消费端的并发情况
+
+- @RabbitMQListener注解 : 消费端监听, 是一个组合注解, 里面可以配置注解 : @Queue, @QueueBinding, @Exchange, 可以通过这个组合注解一次性搞定消费端交换机, 队列, 绑定, 路由, 并且配置监听功能等
+
+  ```java
+  @RabbitListener(bindings = @QueueBinding(
+  	value = @Queue(value = "queue001", durable = "true"),
+      exchange = @Exchange(value = "exchange001", durable = "true",
+      type = "topic", ignoreDeclarationExceptions = "true"),
+      key = "springboot.*"
+  ))
+  @RabbitHandler
+  public void onMessage(Message message, Channel channel) throws Exception {}
+  ```
+
 ## RabbitMQ整合SpringCloud
+
+*SpringCloud暂时不了解, 后续补充*
+
+# RabbitMQ集群架构
+
+## RabbitMQ集群架构模式
+
+### 主备模式
+
+> - 实现RabbitMQ的高可用集群, 一般在并发和数据量不高的情况下, 这种模型简单好用。主备模式也从称之为Warren模式
+> - 主节点如果挂了, 从节点提供服务
+
+![主备模式](image/主备模式.png)
+
+### 远程模式
+
+> 远程模式可以实现双活的一种模式, 简称Shovel模式, 所谓Shovel就是我们可以把消息进行不同数据中心的复制工作, 可以跨地域的让两个MQ集群互联
+
+ ![远程模式](image/shovel(远程)模式.png)
+
+**Shovel模式拓扑图:**
+
+![Shovel模式拓扑图](image/shovel模式拓扑图.png)
+
+1. Shovel集群的配置, 首先需要启动RabbitMQ插件, 命令如下:
+
+   > - rabbitmq-plugins enable amqp_client
+   > - rabbitmq-plugins enable rabbitmq_shovel
+
+2. 创建rabbitmq.config文件 : touch /etc/rabbitmq/rabbitmq.config
+3. 源服务器和目标服务器都使用相同的配置文件(rabbitmq.config)
+
+### 镜像模式
+
+> - 集群中非常经典的就是Mirror镜像模式, 保证100%数据不丢失, 在实际工作中也是使用最多的。集群实现很简单
+> - Mirror镜像队列, 目的是为了保证rabbitmq数据的高可靠性解决方案, 主要就是实现数据的同步, 一般来讲是2-3个节点实现数据同步(对于100%数据可靠性解决方案一般是3节点)
+
+**架构如下:**
+
+![镜像模式](image/镜像模式(mirror).png)
+
+- 上面的SpringBoot Application表示应用, 实际不一定是SpringBoot的
+
+### 多活模式
+
+> 是实现异地数据复制的主流模式, 因为Shovel模式配置比较复杂, 所以一般来说实现异地集群都是使用这种双活或者多活模式来实现的。这种模式需要依赖rabbitmq的federation插件, 可以实现持续的可靠的AMQP数据通信, 多活模式配置与应用都很简单
+
+- RabbitMQ部署架构采用双中心模式(多中心), 在两套(或多套)数据中心各部署一套RabbitMQ集群, 各中心的RabbitMQ服务除了需要为业务提供正常的消息服务外, 中心之间还需要实现部分队列消息共享。多活模式集群架构如下 :
+
+  ![多活模式](image/多活模式.png)
+
+- Federation插件是一个不需要构建Cluster, 而在Broker之间传输消息的高性能插件, Federation插件可以在Broker或者Cluster之间传输消息, 连接的双方可以使用不同的users和virtual hosts, 双方也可以使用不同版本的RabbitMQ和Erlang。Federation插件使用AMQP协议通讯, 可以接受不连续的传输
+
+- Federation Exchanges, 可以看成Downstream从Upsteam主动拉取消息, 但并不是拉取所有消息, 必须是在Downstream上已经明确定义Bindings关系的Exchange, 也就是有实际的物理Queue来接收消息, 才会从Upstream拉取消息到Downstream。使用AMQP协议实施代理间通讯, Downstream会将绑定关系组合在一起, 绑定/解除绑定命令发送到Upstream交换机。因此, Federation Exchange只接收具有订阅的消息, 
+
+  ![Federation Exchange](image/Federation Exchange.png)
+
+从零开始构建一个高可用的RabbitMQ集群
+
+集群配置文件与集群运维故障, 失败转移
+
+高级插件的使用
