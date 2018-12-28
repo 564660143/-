@@ -59,7 +59,7 @@
 - 下载RabbitMQ必须的安装包
 - 配置文件修改
 
-## 安装步骤
+### 安装步骤
 
 1. 安装Erlang环境
 
@@ -2607,8 +2607,561 @@ spring.rabbitmq.listener.simple.max-concurrency=5
 
   ![Federation Exchange](image/Federation Exchange.png)
 
-从零开始构建一个高可用的RabbitMQ集群
+## 镜像模式集群搭建
 
-集群配置文件与集群运维故障, 失败转移
+### 准备三台RabbitMQ节点, 下面是我本地的三台虚拟机
 
-高级插件的使用
+| IP                  | hostname  |
+| ------------------- | --------- |
+| 192.168.72.138:5672 | rabbit138 |
+| 192.168.72.139:5672 | rabbit139 |
+| 192.168.72.140:5672 | rabbit140 |
+
+### 选取任意一个节点作为master节点, 进行文件同步, 我这里选择138作为master节点
+
+> - 将138主机/var/lib/rabbitmq/.erlang.cookie文件同步到139,140主机对应目录下
+> - .erlang.cookie权限是400, 可能无法操作, 可以将权限改成777去复制, 我这里虚拟机是克隆出来的, 所以同步的这一步就省略了
+
+### 组成集群
+
+1. 停止三个节点的MQ服务 : rabbitmqctl stop
+
+2. 在三个节点执行命令 : rabbitmq-server -detached
+
+3. slave加入集群操作(重新加入集群也是同样的操作, 以最开始的主节点作为加入节点)
+
+   > **修改三台主机hosts:**
+   >
+   > vi /etc/hosts, 添加如下三行:
+   >
+   > 192.168.72.139 rabbit139
+   > 192.168.72.138 rabbit138
+   > 192.168.72.140 rabbit140
+   >
+   > **在139,140主机上执行如下命令:**
+   >
+   > rabbitmqctl stop_app
+   >
+   > rabbitmqctl join_cluster --ram rabbit@rabbit138
+   >
+   > rabbitmqctl start_app
+   >
+   > *ram表示以内存方式加入集群, 不写默认以磁盘方式加入集群*
+   >
+   > **移除集群节点命令:**
+   >
+   > 将要移除的节点先停止, 使用命令rabbitmqctl stop_app, 然后在其他节点执行如下命令:
+   >
+   > rabbitmqctl forget_cluster_node rabbit@rabbit139
+
+4. 修改集群名称 : rabbitmqctl set_cluster_name rabbit-qiyexue
+
+5. 查看集群状态 : rabbitmqctl cluster_status
+
+6. 管控台界面, 任意一台主机的即可 : http://192.168.72.140:15672
+
+### 配置镜像队列(设置镜像队列策略)
+
+- rabbitmqctl set_policy ha-all "^" '{"ha-mode":"all"}'
+- 将所有队列设置为镜像队列，即队列会被复制到各个节点，各个节点状态一致，RabbitMQ高可用集群就已经搭建好了,我们可以重启服务，查看其队列是否在从节点同步。
+
+**至此, RabbitMQ镜像模式集群就已经搭建完成了**
+
+### 集群配置参数详解
+
+**配置文件如下:**
+
+```json
+{application, rabbit,           %% -*- erlang -*-
+ [{description, "RabbitMQ"},
+  {id, "RabbitMQ"},
+  {vsn, "3.6.5"},
+  {modules, ['background_gc','delegate','delegate_sup','dtree','file_handle_cache','file_handle_cache_stats','gatherer','gm','lqueue','mirrored_supervisor_sups','mnesia_sync','mochinum','pg2_fixed','pg_local','rabbit','rabbit_access_control','rabbit_alarm','rabbit_amqqueue_process','rabbit_amqqueue_sup','rabbit_amqqueue_sup_sup','rabbit_auth_mechanism_amqplain','rabbit_auth_mechanism_cr_demo','rabbit_auth_mechanism_plain','rabbit_autoheal','rabbit_binding','rabbit_boot_steps','rabbit_channel_sup','rabbit_channel_sup_sup','rabbit_cli','rabbit_client_sup','rabbit_connection_helper_sup','rabbit_connection_sup','rabbit_control_main','rabbit_ctl_usage','rabbit_dead_letter','rabbit_diagnostics','rabbit_direct','rabbit_disk_monitor','rabbit_epmd_monitor','rabbit_error_logger','rabbit_error_logger_file_h','rabbit_exchange','rabbit_exchange_parameters','rabbit_exchange_type_direct','rabbit_exchange_type_fanout','rabbit_exchange_type_headers','rabbit_exchange_type_invalid','rabbit_exchange_type_topic','rabbit_file','rabbit_framing','rabbit_guid','rabbit_hipe','rabbit_limiter','rabbit_log','rabbit_memory_monitor','rabbit_mirror_queue_coordinator','rabbit_mirror_queue_master','rabbit_mirror_queue_misc','rabbit_mirror_queue_mode','rabbit_mirror_queue_mode_all','rabbit_mirror_queue_mode_exactly','rabbit_mirror_queue_mode_nodes','rabbit_mirror_queue_slave','rabbit_mirror_queue_sync','rabbit_mnesia','rabbit_mnesia_rename','rabbit_msg_file','rabbit_msg_store','rabbit_msg_store_ets_index','rabbit_msg_store_gc','rabbit_node_monitor','rabbit_parameter_validation','rabbit_password','rabbit_password_hashing_md5','rabbit_password_hashing_sha256','rabbit_password_hashing_sha512','rabbit_plugins','rabbit_plugins_main','rabbit_plugins_usage','rabbit_policies','rabbit_policy','rabbit_prelaunch','rabbit_prequeue','rabbit_priority_queue','rabbit_queue_consumers','rabbit_queue_index','rabbit_queue_location_client_local','rabbit_queue_location_min_masters','rabbit_queue_location_random','rabbit_queue_location_validator','rabbit_queue_master_location_misc','rabbit_recovery_terms','rabbit_registry','rabbit_resource_monitor_misc','rabbit_restartable_sup','rabbit_router','rabbit_runtime_parameters','rabbit_sasl_report_file_h','rabbit_ssl','rabbit_sup','rabbit_table','rabbit_trace','rabbit_upgrade','rabbit_upgrade_functions','rabbit_variable_queue','rabbit_version','rabbit_vhost','rabbit_vm','supervised_lifecycle','tcp_listener','tcp_listener_sup','truncate','vm_memory_monitor','worker_pool','worker_pool_sup','worker_pool_worker']},
+  {registered, [rabbit_amqqueue_sup,
+                rabbit_log,
+                rabbit_node_monitor,
+                rabbit_router,
+                rabbit_sup,
+                rabbit_direct_client_sup]},
+  {applications, [kernel, stdlib, sasl, mnesia, rabbit_common, ranch, os_mon, xmerl]},
+%% we also depend on crypto, public_key and ssl but they shouldn't be
+%% in here as we don't actually want to start it
+  {mod, {rabbit, []}},
+  {env, [{tcp_listeners, [5672]},
+         {num_tcp_acceptors, 10},
+         {ssl_listeners, []},
+         {num_ssl_acceptors, 1},
+         {ssl_options, []},
+         {vm_memory_high_watermark, 0.4},
+         {vm_memory_high_watermark_paging_ratio, 0.5},
+         {memory_monitor_interval, 2500},
+         {disk_free_limit, 50000000}, %% 50MB
+         {msg_store_index_module, rabbit_msg_store_ets_index},
+         {backing_queue_module, rabbit_variable_queue},
+         %% 0 ("no limit") would make a better default, but that
+         %% breaks the QPid Java client
+         {frame_max, 131072},
+         {channel_max, 0},
+         {heartbeat, 60},
+         {msg_store_file_size_limit, 16777216},
+         {fhc_write_buffering, true},
+         {fhc_read_buffering, false},
+         {queue_index_max_journal_entries, 32768},
+         {queue_index_embed_msgs_below, 4096},
+         {default_user, <<"guest">>},
+         {default_pass, <<"guest">>},
+         {default_user_tags, [administrator]},
+         {default_vhost, <<"/">>},
+         {default_permissions, [<<".*">>, <<".*">>, <<".*">>]},
+         {loopback_users, ["guest"]},
+         {password_hashing_module, rabbit_password_hashing_sha256},
+         {cluster_nodes, {[], disc}},
+         {server_properties, []},
+         {collect_statistics, none},
+         {collect_statistics_interval, 5000},
+         {mnesia_table_loading_timeout, 30000},
+         {auth_mechanisms, ['PLAIN', 'AMQPLAIN']},
+         {auth_backends, [rabbit_auth_backend_internal]},
+         {delegate_count, 16},
+         {trace_vhosts, []},
+         {log_levels, [{connection, info}]},
+         {ssl_cert_login_from, distinguished_name},
+         {ssl_handshake_timeout, 5000},
+         {ssl_allow_poodle_attack, false},
+         {handshake_timeout, 10000},
+         {reverse_dns_lookups, false},
+         {cluster_partition_handling, ignore},
+         {cluster_keepalive_interval, 10000},
+         {tcp_listen_options, [{backlog,       128},
+                               {nodelay,       true},
+                               {linger,        {true, 0}},
+                               {exit_on_close, false}]},
+         {halt_on_upgrade_failure, true},
+         {hipe_compile, false},
+         %% see bug 24513 for how this list was created
+         {hipe_modules,
+          [rabbit_reader, rabbit_channel, gen_server2, rabbit_exchange,
+           rabbit_command_assembler, rabbit_framing_amqp_0_9_1, rabbit_basic,
+           rabbit_event, lists, queue, priority_queue, rabbit_router,
+           rabbit_trace, rabbit_misc, rabbit_binary_parser,
+           rabbit_exchange_type_direct, rabbit_guid, rabbit_net,
+           rabbit_amqqueue_process, rabbit_variable_queue,
+           rabbit_binary_generator, rabbit_writer, delegate, gb_sets, lqueue,
+           sets, orddict, rabbit_amqqueue, rabbit_limiter, gb_trees,
+           rabbit_queue_index, rabbit_exchange_decorator, gen, dict, ordsets,
+           file_handle_cache, rabbit_msg_store, array,
+           rabbit_msg_store_ets_index, rabbit_msg_file,
+           rabbit_exchange_type_fanout, rabbit_exchange_type_topic, mnesia,
+           mnesia_lib, rpc, mnesia_tm, qlc, sofs, proplists, credit_flow,
+           pmon, ssl_connection, tls_connection, ssl_record, tls_record,
+           gen_fsm, ssl]},
+         {ssl_apps, [asn1, crypto, public_key, ssl]},
+         %% see rabbitmq-server#114
+         {mirroring_flow_control, true},
+         {mirroring_sync_batch_size, 4096},
+         %% see rabbitmq-server#227 and related tickets.
+         %% msg_store_credit_disc_bound only takes effect when
+         %% messages are persisted to the message store. If messages
+         %% are embedded on the queue index, then modifying this
+         %% setting has no effect because credit_flow is not used when
+         %% writing to the queue index. See the setting
+         %% queue_index_embed_msgs_below above.
+         {msg_store_credit_disc_bound, {2000, 500}},
+         {msg_store_io_batch_size, 2048},
+         %% see rabbitmq-server#143
+         {credit_flow_default_credit, {200, 50}},
+         %% see rabbitmq-server#248
+         %% and rabbitmq-server#667
+         {channel_operation_timeout, 15000}
+        ]}]}.
+```
+
+**主要配置参数:**
+
+**官网地址 :** http://www.rabbitmq.com/configure.html
+
+| **Key**                                   | **Documentation**                                            |
+| ----------------------------------------- | ------------------------------------------------------------ |
+| **tcp_listeners**                         | 用于监听 AMQP连接的端口列表(无SSL). 可以包含整数 (即"监听所有接口")或者元组如 {"127.0.0.1", 5672} 用于监听一个或多个接口.Default: [5672] |
+| num_tcp_acceptors                         | 接受TCP侦听器连接的Erlang进程数。Default: 10                 |
+| handshake_timeout                         | AMQP 0-8/0-9/0-9-1 handshake (在 socket连接和SSL 握手之后）的最大时间, 毫秒为单位.Default: 10000 |
+| ssl_listeners                             | 如上所述，用于SSL连接。Default: []                           |
+| num_ssl_acceptors                         | 接受SSL侦听器连接的Erlang进程数。Default: 1                  |
+| ssl_options                               | SSL配置.参考[**SSL documentation**](http://www.rabbitmq.com/ssl.html#enabling-ssl).Default: [] |
+| ssl_handshake_timeout                     | SSL handshake超时时间,毫秒为单位.Default: 5000               |
+| **vm_memory_high_watermark**              | 流程控制触发的内存阀值．相看[**memory-based flow control**](http://www.rabbitmq.com/memory.html) 文档.Default: 0.4 |
+| **vm_memory_high_watermark_paging_ratio** | 高水位限制的分数，当达到阀值时，队列中消息消息会转移到磁盘上以释放内存. 参考[**memory-based flow control**](http://www.rabbitmq.com/memory.html) 文档.Default: 0.5 |
+| **disk_free_limit**                       | RabbitMQ存储数据分区的可用磁盘空间限制．当可用空间值低于阀值时，流程控制将被触发.此值可根据RAM的总大小来相对设置 (如.{mem_relative, 1.0}).此值也可以设为整数(单位为bytes)或者使用数字单位(如．"50MB").默认情况下，可用磁盘空间必须超过50MB.参考 [**Disk Alarms**](http://www.rabbitmq.com/disk-alarms.html) 文档.Default: 50000000 |
+| log_levels                                | 控制日志的粒度.其值是日志事件类别(category)和日志级别(level)成对的列表．level 可以是 'none' (不记录日志事件), 'error' (只记录错误), 'warning' (只记录错误和警告), 'info' (记录错误，警告和信息), or 'debug' (记录错误，警告，信息以及调试信息).目前定义了４种日志类别. 它们是：channel -针对所有与AMQP channels相关的事件connection - 针对所有与网络连接相关的事件federation - 针对所有与[**federation**](http://www.rabbitmq.com/federation.html)相关的事件mirroring -针对所有与 [**mirrored queues**](http://www.rabbitmq.com/ha.html)相关的事件Default: [{connection, info}] |
+| frame_max                                 | 与客户端协商的允许最大frame大小. 设置为０表示无限制，但在某些QPid客户端会引发bug. 设置较大的值可以提高吞吐量;设置一个较小的值可能会提高延迟.  Default: 131072 |
+| channel_max                               | 与客户端协商的允许最大chanel大小. 设置为０表示无限制．该数值越大，则broker使用的内存就越高．Default: 0 |
+| channel_operation_timeout                 | Channel 操作超时时间(毫秒为单位） (内部使用，因为消息协议的区别和限制，不暴露给客户端).Default: 5000 |
+| heartbeat                                 | 表示心跳延迟(单位为秒) ，服务器将在connection.tune frame中发送.如果设置为 0, 心跳将被禁用. 客户端可以不用遵循服务器的建议, 查看 [**AMQP reference**](http://www.rabbitmq.com/amqp-0-9-1-reference.html#connection.tune) 来了解详情. 禁用心跳可以在有大量连接的场景中提高性能，但可能会造成关闭了非活动连接的网络设备上的连接落下．Default: 60 (3.5.5之前的版本是580) |
+| default_vhost                             | 当RabbitMQ从头开始创建数据库时创建的虚拟主机. amq.rabbitmq.log交换器会存在于这个虚拟主机中.Default: <<"/">> |
+| default_user                              | RabbitMQ从头开始创建数据库时，创建的用户名.Default: <<"guest">> |
+| default_pass                              | 默认用户的密码.Default: <<"guest">>                          |
+| default_user_tags                         | 默认用户的Tags.Default: [administrator]                      |
+| default_permissions                       | 创建用户时分配给它的默认[**Permissions**](http://www.rabbitmq.com/access-control.html) .Default: [<<".*">>, <<".*">>, <<".*">>] |
+| loopback_users                            | 只能通过环回接口(即localhost)连接broker的用户列表如果你希望默认的guest用户能远程连接,你必须将其修改为[].Default: [<<"guest">>] |
+| cluster_nodes                             | 当节点第一次启动的时候，设置此选项会导致集群动作自动发生. 元组的第一个元素是其它节点想与其建立集群的节点. 第二个元素是节点的类型，要么是disc,要么是ramDefault: {[], disc} |
+| server_properties                         | 连接时向客户端声明的键值对列表Default: []                    |
+| collect_statistics                        | 统计收集模式。主要与管理插件相关。选项：none (不发出统计事件)coarse (发出每个队列 /每个通道 /每个连接的统计事件)fine (也发出每个消息统计事件)你自已可不用修改此选项.Default: none |
+| collect_statistics_interval               | 统计收集时间间隔(毫秒为单位)． 主要针对于 [**management plugin**](http://www.rabbitmq.com/management.html#statistics-interval).Default: 5000 |
+| auth_mechanisms                           | 提供给客户端的[**SASL authentication mechanisms**](http://www.rabbitmq.com/authentication.html).Default: ['PLAIN', 'AMQPLAIN'] |
+| auth_backends                             | 用于 [**authentication / authorisation backends**](http://www.rabbitmq.com/access-control.html) 的列表. 此列表可包含模块的名称(在模块相同的情况下，将同时用于认证来授权)或像{ModN, ModZ}这样的元组，在这里ModN将用于认证，ModZ将用于授权.在２元组的情况中, ModZ可由列表代替,列表中的所有元素必须通过每个授权的确认，如{ModN, [ModZ1, ModZ2]}.这就允许授权插件进行组合提供额外的安全约束.除rabbit_auth_backend_internal外，其它数据库可以通常 [**plugins**](http://www.rabbitmq.com/plugins.html)来使用.Default: [rabbit_auth_backend_internal] |
+| reverse_dns_lookups                       | 设置为true,可让客户端在连接时让RabbitMQ 执行一个反向DNS查找, 然后通过 rabbitmqctl 和 管理插件来展现信息.  Default: false |
+| delegate_count                            | 内部集群通信中，委派进程的数目. 在一个有非常多核的机器(集群的一部分)上,你可以增加此值.Default: 16 |
+| trace_vhosts                              | [**tracer**](http://www.rabbitmq.com/firehose.html)内部使用.你不应该修改.Default: [] |
+| tcp_listen_options                        | 默认socket选项. 你可能不想修改这个选项.Default:[{backlog,       128},          {nodelay,       true},          {exit_on_close, false}] |
+| **hipe_compile**                          | 将此选项设置为true,将会使用HiPE预编译部分RabbitMQ,Erlang的即时编译器. 这可以增加服务器吞吐量，但会增加服务器的启动时间． 你可以看到花费几分钟延迟启动的成本，就可以带来20-50% 更好性能.这些数字与高度依赖于工作负载和硬件．HiPE 支持可能没有编译进你的Erlang安装中.如果没有的话，启用这个选项,并启动RabbitMQ时，会看到警告消息． 例如, Debian / Ubuntu 用户需要安装erlang-base-hipe 包.HiPE并非在所有平台上都可用,尤其是Windows.在 Erlang/OTP 1７.５版本之前，HiPE有明显的问题 . 对于HiPE,使用最新的OTP版本是高度推荐的．Default: false |
+| cluster_partition_handling                | 如何处理网络分区.可用模式有:ignorepause_minority{pause_if_all_down, [nodes], ignore \| autoheal}where [nodes] is a list of node names (ex: ['rabbit@node1', 'rabbit@node2'])autoheal参考[**documentation on partitions**](http://www.rabbitmq.com/partitions.html#automatic-handling) 来了解更多信息Default: ignore |
+| cluster_keepalive_interval                | 节点向其它节点发送存活消息和频率(毫秒). 注意，这与 **net_ticktime是不同的**;丢失存活消息不会引起节点掉线Default: 10000 |
+| queue_index_embed_msgs_below              | 消息大小在此之下的会直接内嵌在队列索引中. 在修改此值时，建议你先阅读　 [**persister tuning**](http://www.rabbitmq.com/persistence-conf.html) 文档.Default: 4096 |
+| msg_store_index_module                    | 队列索引的实现模块. 在修改此值时，建议你先阅读　 [**persister tuning**](http://www.rabbitmq.com/persistence-conf.html) 文档.Default: rabbit_msg_store_ets_index |
+| backing_queue_module                      | 队列内容的实现模块. 你可能不想修改此值．Default: rabbit_variable_queue |
+| msg_store_file_size_limit                 | Tunable value for the persister. 你几乎肯定不应该改变此值。Default: 16777216 |
+| mnesia_table_loading_timeout              | 在集群中等待使用Mnesia表可用的超时时间。Default: 30000       |
+| queue_index_max_ journal_entries          | Tunable value for the persister. 你几乎肯定不应该改变此值。Default: 65536 |
+| queue_master_locator                      | Queue master 位置策略.可用策略有:<<"min-masters">><<"client-local">><<"random">>查看[**documentation on queue master location**](http://www.rabbitmq.com/ha.html#queue-master-location) 来了解更多信息．Default: <<"client-local">> |
+
+### HaProxy
+
+#### HaProxy简介
+
+> HAProxy是一款提供高可用性、负载均衡以及基于TCP(第四层)和HTTP(第七层)应用的代理软件，支持虚拟主机, HAProxy是完全免费的、借助HAProxy可以快速并且可靠的提供基于TCP和HTTP应用的代理解决方案。
+>
+> HAProxy适用于那些负载较大的web站点，这些站点通常又需要会话保持或七层处理。 
+>
+> HAProxy可以支持数以万计的并发连接,并且HAProxy的运行模式使得它可以很简单安全的整合进架构中，同时可以保护web服务器不被暴露到网络上。
+
+**HaProxy借助于OS(操作系统)上几种常见的技术来实现性能的最大化 :**
+
+1. 单进程, 事件驱动模型显著降低了上下文切换的开销及内存占用
+2. 在任何可用的情况下, 单缓冲(single buffering)机制能以不复制任何数据的方式完成读写操作, 这会节约大量的CPU时钟周期及内存带宽
+3. 借助于Linux2.6(>=2.6.27.19)上的splice()系统调用, HaProxy可以实现零复制转发(Zero-copy fowarding), 在Linux3.5及以上的OS中还可以实现零复制启动(zero-starting)
+4. 内存分配器固定大小的内存池中可实现即时内存分配,  这能显著减少创建一个会话的时长
+5. 树形存储 : 侧重于使用作者多年前开发的弹性二叉树, 实现了以O(logn)的低开销来保持计时器命令, 保持运行队列命令及管理轮询以及最少连接队列
+
+#### HaProxy安装
+
+这里准备了两台虚拟机,192.168.72.141/142, 两台虚拟机都使用同样步骤进行安装
+
+```shell
+// 下载依赖包
+yum install gcc vim wget
+// 下载haproxy
+wget https://www.haproxy.org/download/1.6/src/haproxy-1.6.5.tar.gz
+// 解压
+tar -zxvf haproxy-1.6.5.tar.gz -C /usr/local
+// 进入目录、进行编译、安装
+cd /usr/local/haproxy-1.6.5
+make TARGET=linux31 PREFIX=/usr/local/haproxy
+make install PREFIX=/usr/local/haproxy
+mkdir /etc/haproxy
+// 赋权
+groupadd -r -g 149 haproxy
+useradd -g haproxy -r -s /sbin/nologin -u 149 haproxy
+// 创建haproxy配置文件
+touch /etc/haproxy/haproxy.cfg
+
+```
+
+#### HaProxy配置
+
+vim /etc/haproxy/haproxy.cfg
+
+```yml
+#logging options
+global
+	log 127.0.0.1 local0 info
+	maxconn 5120
+	chroot /usr/local/haproxy
+	uid 99
+	gid 99
+	daemon
+	quiet
+	nbproc 20
+	pidfile /var/run/haproxy.pid
+
+defaults
+	log global
+	#使用4层代理模式，”mode http”为7层代理模式
+	mode tcp
+	#if you set mode to tcp,then you nust change tcplog into httplog
+	option tcplog
+	option dontlognull
+	retries 3
+	option redispatch
+	maxconn 2000
+	contimeout 5s
+     ##客户端空闲超时时间为 60秒 则HA 发起重连机制
+     clitimeout 60s
+     ##服务器端链接超时时间为 15秒 则HA 发起重连机制
+     srvtimeout 15s	
+#front-end IP for consumers and producters
+
+listen rabbitmq_cluster
+	bind 0.0.0.0:5672
+	#配置TCP模式
+	mode tcp
+	#balance url_param userid
+	#balance url_param session_id check_post 64
+	#balance hdr(User-Agent)
+	#balance hdr(host)
+	#balance hdr(Host) use_domain_only
+	#balance rdp-cookie
+	#balance leastconn
+	#balance source //ip
+	#简单的轮询
+	balance roundrobin
+	#rabbitmq集群节点配置 #inter 每隔五秒对mq集群做健康检查， 2次正确证明服务器可用，2次失败证明服务器不可用，并且配置主备机制
+        server rabbit138 192.168.72.138:5672 check inter 5000 rise 2 fall 2
+        server rabbit139 192.168.72.139:5672 check inter 5000 rise 2 fall 2
+        server rabbit140 192.168.72.140:5672 check inter 5000 rise 2 fall 2
+#配置haproxy web监控，查看统计信息
+listen stats
+	# 142主机就配置成142
+	bind 192.168.72.141:8100
+	mode http
+	option httplog
+	stats enable
+	#设置haproxy监控地址为http://localhost:8100/rabbitmq-stats
+	stats uri /rabbitmq-stats
+	stats refresh 5s
+
+```
+
+#### 启动HaProxy
+
+> /usr/local/haproxy/sbin/haproxy -f /etc/haproxy/haproxy.cfg
+>
+> // 查看haproxy进程状态
+>
+> ps -ef | grep haproxy
+
+**控制台访问地址 :** http://192.168.72.141/142:8100/rabbitmq-stats
+
+### Keepalived
+
+#### Keepalived简介
+
+- 基于VRRP协议来实现高可用性（HA）, 主要来防止服务器单点故障的发生问题
+
+- VRRP（Virtual Router Redundancy Protocol）虚拟路由器冗余协议, VRRP协议将两台或多台路由器设备虚拟成一个设备，对外提供虚拟路由器IP（一个或多个）。它能保证当个别节点宕机时, 整个网络可以不间断的运行。
+
+- 可以通过其与Nginx、Haproxy等反向代理的负载均衡服务器配合实现web服务端的高可用
+
+- Keepalived的三个重要功能:
+
+  > - 具有配置管理LVS负载均衡软件
+  > - 实现LVS集群节点的健康检查功能
+  > - 实现系统网络的高可用(failover)功能
+
+**Keepalived高可用原理**
+
+Keepalived高可用服务之间的故障转移切换, 是通过VRRP协议来实现的。在Keepalived服务正常工作时, Master接待会不断的向slave节点发送心跳消息, 用于告诉从Backup节点自己还活着, 当Master节点发生故障时, 就无法发送心跳消息, 从节点就因此无法继续监测到来自Master节点的心跳了, 于是调用自身的接管程序, 接管Master节点的IP资源及服务。当Master节点恢复时, 从节点又会释放主节点故障时自身接管的IP资源及服务, 恢复到原来的备用角色
+
+#### Keepalived安装
+
+1. 这里Keepalived安装的机器和的HaProxy安装在同样的机器上面, 192.168.72.141/142
+
+2. 安装所需软件包
+
+   > yum install -y openssl openssl-devel
+
+3. 下载Keepalived, 下载地址 :http://www.keepalived.org/download.html
+
+   > wget http://www.keepalived.org/software/keepalived-1.2.18.tar.gz
+
+4. 解压、编译、安装
+
+   > tar -zxvf keepalived-1.2.18.tar.gz -C /usr/local/
+   >
+   > cd /usr/local/keepalived-1.2.18/ && ./configure --prefix=/usr/local/keepalived
+   >
+   > make && make install
+
+4. 将keepalived安装成Linux系统服务，因为没有使用keepalived的默认安装路径（默认路径：/usr/local）,安装完成之后，需要做一些修改工作
+
+   > **首先创建文件夹，将keepalived配置文件进行复制：**
+   >
+   > mkdir /etc/keepalived
+   >
+   > cp /usr/local/keepalived/etc/keepalived/keepalived.conf /etc/keepalived/
+   >
+   > **然后复制keepalived脚本文件：**
+   >
+   > cp /usr/local/keepalived/etc/rc.d/init.d/keepalived /etc/init.d/
+   >
+   > cp /usr/local/keepalived/etc/sysconfig/keepalived /etc/sysconfig/
+   >
+   > **创建软连接, 如果软连接存在就删除重建:**
+   >
+   > ln -s /usr/local/sbin/keepalived /usr/sbin/
+   >
+   > ln -s /usr/local/keepalived/sbin/keepalived /sbin/
+
+5. 设置开机启动, 安装完毕
+
+   > chkconfig keepalived on
+
+6. 修改Keepalived配置, vim /etc/keepalived/keepalived.conf
+
+   **141作为主节点, 配置如下:**
+
+   ```yaml
+   ! Configuration File for keepalived
+   
+   global_defs {
+      router_id keepalived141  ##标识节点的字符串，通常为hostname
+   
+   }
+   
+   vrrp_script chk_haproxy {
+       script "/etc/keepalived/haproxy_check.sh"  ##执行脚本位置
+       interval 2  ##检测时间间隔
+       weight -20  ##如果条件成立则权重减20
+   }
+   
+   vrrp_instance VI_1 {
+       state MASTER  ## 主节点为MASTER，备份节点为BACKUP
+       interface ens33 ## 绑定虚拟IP的网络接口（网卡），与本机IP地址所在的网络接口相同（我这里是ens33）
+       virtual_router_id 141  ## 虚拟路由ID号（主备节点一定要相同）
+       mcast_src_ip 192.168.72.141 ## 本机ip地址
+       priority 100  ##优先级配置（0-254的值）
+       nopreempt
+       advert_int 1  ## 组播信息发送间隔，俩个节点必须配置一致，默认1s
+   authentication {  ## 认证匹配
+           auth_type PASS
+           auth_pass qiyexue
+       }
+   
+       track_script {
+           chk_haproxy
+       }
+   
+       virtual_ipaddress {
+           192.168.72.145  ## 虚拟ip，可以指定多个
+       }
+   ```
+
+   **142作为从节点, 配置如下 :**
+
+   ```yaml
+   ! Configuration File for keepalived
+   
+   global_defs {
+      router_id keepalived142  ##标识节点的字符串，通常为hostname
+   
+   }
+   
+   vrrp_script chk_haproxy {
+       script "/etc/keepalived/haproxy_check.sh"  ##执行脚本位置
+       interval 2  ##检测时间间隔
+       weight -20  ##如果条件成立则权重减20
+   }
+   
+   vrrp_instance VI_1 {
+       state BACKUP  ## 主节点为MASTER，备份节点为BACKUP
+       interface ens33 ## 绑定虚拟IP的网络接口（网卡），与本机IP地址所在的网络接口相同（我这里是ens33）
+       virtual_router_id 141  ## 虚拟路由ID号（主备节点一定要相同）
+       mcast_src_ip 192.168.72.142 ## 本机ip地址
+       priority 90  ##优先级配置（0-254的值）
+       nopreempt
+       advert_int 1  ## 组播信息发送间隔，俩个节点必须配置一致，默认1s
+   authentication {  ## 认证匹配
+           auth_type PASS
+           auth_pass qiyexue
+       }
+   
+       track_script {
+           chk_haproxy
+       }
+   
+       virtual_ipaddress {
+           192.168.72.145  ## 虚拟ip，可以指定多个
+       }
+   }
+   ```
+
+7. 检测脚本编写, 添加文件位置为/etc/keepalived/haproxy_check.sh(141, 142两个节点文件内容一致), 脚本内容如下:
+
+   ```shell
+   #!/bin/bash
+   COUNT=`ps -C haproxy --no-header |wc -l`
+   if [ $COUNT -eq 0 ];then
+       /usr/local/haproxy/sbin/haproxy -f /etc/haproxy/haproxy.cfg
+       sleep 2
+       if [ `ps -C haproxy --no-header |wc -l` -eq 0 ];then
+           killall keepalived
+       fi
+   fi
+   ```
+
+8. 执行脚本赋权(141,142同样操作)
+
+   > chmod +x /etc/keepalived/haproxy_check.sh
+
+9. 启动keepalived
+
+   ```shell
+   # 启动两台机器的keepalived
+   # 四个命令对应 启动, 停止, 查看状态, 重启
+   service keepalived start | stop | status | restart
+   # 查看状态
+   ps -ef | grep haproxy
+   ps -ef | grep keepalived
+   
+   ```
+
+11. 节点测试
+    - 安装完成之后, 执行ip a看下两个主机ip, 发现VIP 145在主节点141上
+    - 将141的keepalived停掉, 然后发现VIP 145浮动到了142上面
+    - 将141再启起来, VIP 145又再次浮动到141上了
+
+## 集群恢复与故障转移
+
+前提 : A, B两个节点组成一个镜像队列, B是Master节点
+
+### 场景一
+
+- A先停, B后停
+- 解决方案 : 该场景下B是Master, 只要先启动B, 在启动A即可。或者先启动A, 30秒之内启动B即可恢复镜像队列
+
+### 场景二
+
+- A, B同时停机
+- 解决方案 : 只需要在30秒内连续启动A和B即可恢复镜像
+
+### 场景三
+
+- A先停, B后停, 且A无法恢复
+- 解决场景 : 因为B是Master, 所以等B启起来以后, 在B节点上调用控制台命令 : **rabbitmqctl forget_cluster_node A**解除与A的Cluster关系, 再将新的Slave节点加入B即可重新恢复镜像队列
+
+### 场景四
+
+- A先停, B后停, 且B无法恢复
+- 解决方案 : 因为Master节点无法恢复, 所以较难处理, 在3.4.2之前没有什么好的解决方案, 但是现在已经有解决方案了, 在3.4.2以后的版本。因为B是主节点, 所以直接启动A是不行的, 当A无法启动时, 也就没有办法在A节点上调用**rabbitmqctl forget_cluster_node B **命令了。但是在新版本中forget_cluster_node支持**--offline**参数, 支持线下移除节点。这就意味着运行rabbitmqctl在理想节点上执行命令, 迫使RabbitMQ在未启动Slave节点中选择一个节点作为Master。当在A节点执行**rabbitmqctl forget_cluster_node --offline B **时, RabbitMQ会mock一个节点代表A, 执行 **forget_cluster_node**命令将B移除cluster, 然后A就可以正常启动了, 最后将新的Slave节点加入A即可重新恢复镜像队列
+
+**场景五**
+
+- A先停, B后停, 且A, B均无法恢复, 但是能得到A或B的磁盘文件
+- 解决方案 : 这种场景更加难以处理, 只能通过恢复数据的方式去尝试恢复, 将A或B的数据库文件默认在$RABBIT_HOME/var/lib目录中, 把它拷贝到新节点对应的目录下, 再将新节点的hostname改成A或B的hostname, 如果是A节点(Slave)的磁盘文件, 按照场景四处理即可, 如果是B节点(Master)的磁盘文件, 则按照场景三处理, 最后将新的Slave加入到新节点后完成恢复
+- 这种场景很极端, 只能尝试恢复
+
+### 场景六
+
+- A,B均停机, A,B均无法恢复, 且A或B的磁盘文件都无法恢复
+- 解决方案 : 凉凉, 无法解决
+
+# 延迟插件
+
+## 作用
+
+- 消息的延迟推送
+- 定时任务(消息)的执行
+- 一些消息重试策略的配合使用
+- 业务削峰限流
+- 降级的异步延迟消息机制
+
+## 安装
