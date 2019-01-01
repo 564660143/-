@@ -2663,6 +2663,24 @@ spring.rabbitmq.listener.simple.max-concurrency=5
 ### 配置镜像队列(设置镜像队列策略)
 
 - rabbitmqctl set_policy ha-all "^" '{"ha-mode":"all"}'
+
+  > **pattern** 是匹配队列名称的正则表达式 , 进行区分哪些队列使用哪些策略
+  >
+  > **definition** 其实就是一些arguments, 支持如下参数：
+  >
+  > 1. `**ha-mode**：`One of `all`, `exactly` or `nodes` (the latter currently not supported by web UI).
+  > 2. `**ha-params**：`Absent if `ha-mode` is `all`, a number if `ha-mode` is `exactly`, or an array of strings if `ha-mode` is `nodes`.
+  > 3. `**ha-sync-mode**：`One of `manual` or `automatic`. *//如果不指定该参数默认为manual,这个在高可用集群测试的时候详细分析* 
+  > 4. `**federation-upstream-set**：`A string; only if the federation plugin is enabled.
+  >
+  > **ha-mode** 的参数：
+  >
+  > | ha-mode | ha-params    | Result                                                       |
+  > | ------- | ------------ | ------------------------------------------------------------ |
+  > | all     | (absent)     | Queue is mirrored across all nodes in the cluster. When a new node is added to the cluster, the queue will be mirrored to that node. |
+  > | exactly | *count*      | Queue is mirrored to *count* nodes in the cluster. If there are less than *count* nodes in the cluster, the queue is mirrored to all nodes. If there are more than *count*nodes in the cluster, and a node containing a mirror goes down, then a new mirror will not be created on another node. (This is to prevent queues migrating across a cluster as it is brought down.) |
+  > | nodes   | *node names* | Queue is mirrored to the nodes listed in *node names*. If any of those node names are not a part of the cluster, this does not constitute an error. If none of the nodes in the list are online at the time when the queue is declared then the queue will be created on the node that the declaring client is connected to. |
+
 - 将所有队列设置为镜像队列，即队列会被复制到各个节点，各个节点状态一致，RabbitMQ高可用集群就已经搭建好了,我们可以重启服务，查看其队列是否在从节点同步。
 
 **至此, RabbitMQ镜像模式集群就已经搭建完成了**
@@ -3165,3 +3183,107 @@ Keepalived高可用服务之间的故障转移切换, 是通过VRRP协议来实�
 - 降级的异步延迟消息机制
 
 ## 安装
+
+1. 下载插件
+
+   > <http://www.rabbitmq.com/community-plugins.html>
+   >
+   > <https://bintray.com/rabbitmq/community-plugins/rabbitmq_delayed_message_exchange/v3.6.x#files/>
+
+2. 将插件上传到主机
+
+   > /usr/lib/rabbitmq/lib/rabbitmq_server-3.6.5/plugins
+
+3. 启用插件
+
+   > rabbitmq-plugins enable rabbitmq_delayed_message_exchange
+
+# RabbitMQ-SET化架构
+
+- 使用Federation插件进行不同集群的RabbitMQ节点之间进行通信
+-  集群之间节点通信由集群保障, 这样就能在不同集群之间完成数据同步
+
+# RabbitMQ-基础组件封装
+
+![MQ组件实现思路和架构设计方案](image/MQ组件实现思路和架构设计方案.png)
+
+- 支持高性能的序列化转换, 异步化发送消息
+- 支持消息生产实例与消费实例的链接池化缓存化, 提升性能
+- 支持可靠性投递消息, 保障消息100%不丢失
+- 支持消费端的幂等操作, 避免消费端重复消费的问题
+- 支持迅速消息发送模式, 在一些日志收集/统计分析等需求下可以保证高性能, 高吞吐量
+- 支持延迟消息模式, 消息可以延迟发送, 指定延迟时间, 用于某些延迟检查, 服务限流场景
+- 支持事务消息, 器100%保障可靠性投递, 在金融行业单笔大金额操作时会有此类需求
+- 支持顺序消息, 保证消息送达消费端的先后顺序
+- 支持消息补偿, 重试, 以及快速定位异常/失败消息
+- 支持集群消息负载均衡, 保障消息落到具体SET集群的负载均衡
+- 支持消息路由策略, 指定某些消息路由到指定的SET集群
+
+## 迅速消息发送
+
+- 迅速消息是指消息不进行落库存储, 不做可靠性的保障
+- 在一些非核心消息, 日志数据, 或者统计分析等场景下比较合适
+- 迅速消息的优点就是性能最高, 吞吐量最大
+
+![1546040260892](image/迅速消息发送.png)
+
+## 确认消息发送
+
+![1546040311526](image/确认消息发送.png)
+
+1. step1, step2 : 业务信息和消息信息入库
+2. step3 : 消息发送到MQ Broker
+3. step4 : Broker回送一个ACK确认消息
+4. step5 : 更新DB中消息状态
+5. step6 : 定时任务读取中间状态消息
+6. step7 : 执行消息重发
+7. step8 : 重发多次依旧失败的消息, 将其置为失败终态
+
+## 批量消息发送
+
+> 批量消息是指我们把消息放到一个集合里统一进行提交, 这种方案设计思路是期望消息在一个会话里, 比如投递到threadlocal里的集合, 然后拥有相同的会话ID, 并且带有这次提交消息的SIZE等相关相关属性, 最重要的一点是要把这一批消息进行合并。对于Channel而言, 就是发送一次消息。这种方式也是希望消费端在消费的时候, 可以进行批量化的消费, 针对于某一个原子业务的操作去处理, 但是不保障可靠性, 需要进行补偿机制。
+
+![1546040930992](image/批量消息发送.png)
+
+1. step1 : 业务数据入库
+2. step2 : 消息组装之后进行统一入库(如果不需要可靠性投递的话, 可以省略)
+3. step3 : 消息发送到Broker
+4. step4-step8基本和确认消息是一致的,如果不需要可靠性投递的话, 是可以省略的
+
+## 延迟消息发送
+
+- 延迟消息就是在Message封装的时候, 添加delayTime属性即可, 使得我们的消息可以进行延迟发送
+
+## 顺序消息发送
+
+- 顺序消息有点类似于批量消息的实现机制, 但是有些不同, 顺序消息需要保障一下几点:
+
+  1. 发送的顺序消息, 必须保障消息投递到同一个队列, 且这个消费者只能有一个(独占模式)
+  2. 然后需要统一提交(可能是合并成一个大的消息, 也可能是拆分为多个消息), 并且所有消息的会话ID要一致
+  3. 添加消息属性 : 顺序标记的序号, 和本次顺序消息的SIZE属性, 进行落库操作
+  4. 并行进行发送给自身的延迟消息(带上关键属性 : **会话ID, SIZE**)进行后续处理消费
+  5. 当收到延迟消息后, 根据会话**ID, SIZE**抽取数据库数据进行处理即可
+  6. 定时轮询补偿机制, 对于异常情况(如生产端消息没有完全投递成功或者消费端落库异常导致消费端落库后缺少消息条目的情况)进行补偿
+
+  ![1546042013158](image/顺序消息.png)
+
+## 事务消息发送
+
+- 事务消息, 使用相对较少
+- 为了保障性能的同时, 也支持事务。并不推荐选择传统的RabbitMQ事务和Spring集成的机制, 因为在性能测试过程中, 这种方式性能并不理想, 非常消耗系统资源, 且会出现阻塞等情况, 高峰期也是一定程度上影响MQ集群的性能
+- 解决方案 : 采用类似可靠性投递的机制, 也就是补偿机制。但是数据源必须是同一个, 也就是业务操作的数据库DB1和消息记录的数据库DB2使用同一个数据库, 保证DB层的数据一致性
+- 然后利用重写Spring DataSourceTransactionManager, 在本地事务提交的时候进行发送消息, 但是也有可能事务提交成功但是消息发送失败, 这个时候就需要进行补偿了。
+
+![1546042667239](image/事务消息.png)
+
+## 消息幂等性保障-消息路由规则架构设计
+
+**可能导致消息出现非幂等性的原因 :** 
+
+- 可靠性消息投递机制造成的消息重发
+- MQ Broker服务于消费端消息传输的过程中出现网络抖动
+- 消费端故障或异常
+
+**消息幂等性设计 :**
+
+![1546171286569](image/消息幂等性设计.png)
